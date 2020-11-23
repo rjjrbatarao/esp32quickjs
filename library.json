@@ -1,0 +1,38 @@
+{
+  "name": "QuickJS",
+  "description": "QuickJS Javascript Engine for ESP32",
+  "keywords": "JavaScript",
+  "authors": [
+    {
+      "name": "Fabrice Bellard",
+      "url": "https://bellard.org/quickjs/"
+    },
+    {
+      "name": "binzume",
+      "url": "https://github.com/binzume/esp32quickjs"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/binzume/esp32quickjs.git"
+  },
+  "version": "0.0.1",
+  "framework": "*",
+  "platforms": "espressif32",
+  "build": {
+    "flags": "-DCONFIG_VERSION=\\\"2020-11-08\\\"",
+    "srcFilter": [
+      "+<*.c>",
+      "+<*.h>",
+      "-<tests/>",
+      "-<examples/>",
+      "-<doc/>",
+      "-<qjs.c>",
+      "-<qjsc.c>",
+      "-<quickjs-libc.c>",
+      "-<quickjs-libc.h>",
+      "-<unicode_gen.c>",
+      "-<run-test262.c>"
+    ]
+  }
+}

@@ -11,6 +11,7 @@ platformio.ini
 
 ```ini
 lib_deps = 
+  ...
 	https://github.com/binzume/esp32quickjs.git
 ```
 
@@ -18,15 +19,17 @@ main.cpp
 
 ```c++
 #include <Arduino.h>
-#include "quickjs.h"
+#include "esp/QuickJS.h"
 
-JSRuntime *rt;
-JSContext *ctx;
+static const char *jscode = R"CODE(
+  console.log('Hello, JavaScript!');
+)CODE";
+
+M5QuickJS qjs;
 
 void setup() {
-  rt = JS_NewRuntime();
-  ctx = JS_NewContext(rt);
-  // Do anything.
+  Serial.begin(115200);
+  qjs.begin();
+  qjs.exec(jscode);
 }
-
 ```

@@ -1,6 +1,14 @@
 #pragma once
 #include <Arduino.h>
 
+#if defined(WiFi_h) || defined(ENABLE_HTTP)
+#include <HTTPClient.h>
+#include <StreamString.h>
+#ifndef ENABLE_HTTP
+#define ENABLE_HTTP
+#endif
+#endif
+
 #include <algorithm>
 #include <vector>
 
@@ -35,6 +43,98 @@ void qjs_dump_exception(JSContext *ctx, JSValue v) {
   }
   JS_FreeValue(ctx, e);
 }
+
+#ifdef ENABLE_HTTP
+class JSHttpFetcher {
+  struct Entry {
+    HTTPClient *client;
+    JSValue resolving_funcs[2];
+    int status;
+    void result(JSContext *ctx, uint32_t func, JSValue body) {
+      delete client;  // dispose connection before invoke;
+      JSValue r = JS_NewObject(ctx);
+      JS_SetPropertyStr(ctx, r, "body", JS_DupValue(ctx, body));
+      JS_SetPropertyStr(ctx, r, "status", JS_NewInt32(ctx, status));
+      JS_Call(ctx, resolving_funcs[func], JS_UNDEFINED, 1, &r);
+      JS_FreeValue(ctx, r);
+      JS_FreeValue(ctx, resolving_funcs[0]);
+      JS_FreeValue(ctx, resolving_funcs[1]);
+    }
+  };
+  std::vector<Entry *> queue;
+
+ public:
+  JSValue fetch(JSContext *ctx, JSValueConst jsUrl, JSValueConst options) {
+    if (WiFi.status() != WL_CONNECTED) {
+      return JS_EXCEPTION;
+    }
+    const char *url = JS_ToCString(ctx, jsUrl);
+    if (!url) {
+      return JS_EXCEPTION;
+    }
+    const char *method = nullptr, *body = nullptr;
+    if (JS_IsObject(options)) {
+      JSValue m = JS_GetPropertyStr(ctx, options, "method");
+      if (JS_IsString(m)) {
+        method = JS_ToCString(ctx, m);
+      }
+      JSValue b = JS_GetPropertyStr(ctx, options, "body");
+      if (JS_IsString(m)) {
+        body = JS_ToCString(ctx, b);
+      }
+    }
+
+    Entry *ent = new Entry();
+    ent->client = new HTTPClient();
+    ent->client->begin(url);
+    JS_FreeCString(ctx, url);
+
+    // TODO: remove blocking calls.
+    if (method) {
+      ent->status = ent->client->sendRequest(method, (uint8_t *)body,
+                                             body ? strlen(body) : 0);
+    } else {
+      ent->status = ent->client->GET();
+    }
+    queue.push_back(ent);
+
+    JS_FreeCString(ctx, method);
+    JS_FreeCString(ctx, body);
+    return JS_NewPromiseCapability(ctx, ent->resolving_funcs);
+  }
+
+  void loop(JSContext *ctx) {
+    int doneCount = 0;
+    for (auto &pent : queue) {
+      WiFiClient *stream = pent->client->getStreamPtr();
+      if (stream == nullptr || pent->status <= 0) {
+        // reject.
+        pent->result(ctx, 1, JS_UNDEFINED);
+        delete pent;
+        pent = nullptr;
+        doneCount++;
+        continue;
+      }
+      if (stream->available()) {
+        String body = pent->client->getString();
+        JSValue bodyStr = JS_NewString(ctx, body.c_str());
+        body.clear();
+        pent->result(ctx, 0, bodyStr);
+        JS_FreeValue(ctx, bodyStr);
+        delete pent;
+        pent = nullptr;
+        doneCount++;
+      }
+    }
+
+    if (doneCount > 0) {
+      queue.erase(std::remove_if(queue.begin(), queue.end(),
+                                 [](Entry *pent) { return pent == nullptr; }),
+                  queue.end());
+    }
+  }
+};
+#endif  // ENABLE_HTTP
 
 class JSTimer {
   // 20 bytes / entry.
@@ -78,8 +178,8 @@ class JSTimer {
       timers.pop_back();
     }
     for (auto &ent : t) {
-      JSValue r =
-          JS_Call(ctx, ent.func, ent.func, 0, nullptr);  // may update timers.
+      // NOTE: may update timers in this JS_Call().
+      JSValue r = JS_Call(ctx, ent.func, ent.func, 0, nullptr);
       if (JS_IsException(r)) {
         qjs_dump_exception(ctx, r);
       }
@@ -102,6 +202,9 @@ class ESP32QuickJS {
   JSContext *ctx;
   JSTimer timer;
   JSValue loop_func = JS_UNDEFINED;
+#ifdef ENABLE_HTTP
+  JSHttpFetcher httpFetcher;
+#endif
 
   void begin() {
     JSRuntime *rt = JS_NewRuntime();
@@ -135,6 +238,10 @@ class ESP32QuickJS {
       timer.ConsumeTimer(ctx, now);
     }
 
+#ifdef ENABLE_HTTP
+    httpFetcher.loop(ctx);
+#endif
+
     // loop()
     if (callLoopFn && JS_IsFunction(ctx, loop_func)) {
       JSValue ret = JS_Call(ctx, loop_func, loop_func, 0, nullptr);
@@ -156,7 +263,7 @@ class ESP32QuickJS {
 
   JSValue eval(const char *code) {
     JSValue ret =
-        JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_FLAG_STRICT);
+        JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_MODULE);
     if (JS_IsException(ret)) {
       qjs_dump_exception(ctx, ret);
     }
@@ -200,21 +307,64 @@ class ESP32QuickJS {
     JS_SetPropertyStr(ctx, global, "clearInterval",
                       JS_NewCFunction(ctx, clear_timeout, "clearInterval", 1));
 
-    // gpio
-    JSValue gpio = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, global, "gpio", gpio);
-    JS_SetPropertyStr(ctx, gpio, "pinMode",
-                      JS_NewCFunction(ctx, gpio_mode, "pinMode", 2));
-    JS_SetPropertyStr(
-        ctx, gpio, "digitalRead",
-        JS_NewCFunction(ctx, gpio_digital_read, "digitalRead", 1));
-    JS_SetPropertyStr(
-        ctx, gpio, "digitalWrite",
-        JS_NewCFunction(ctx, gpio_digital_write, "digitalWrite", 2));
+    static const JSCFunctionListEntry esp32_funcs[] = {
+        JSCFunctionListEntry{"millis", 0, JS_DEF_CGETSET, 0, {
+                               getset : {esp32_millis, nullptr}
+                             }},
+        JSCFunctionListEntry{"pinMode", 0, JS_DEF_CFUNC, 0, {
+                               func : {2, JS_CFUNC_generic, esp32_gpio_mode}
+                             }},
+        JSCFunctionListEntry{"digitalRead", 0, JS_DEF_CFUNC, 0, {
+                               func : {1, JS_CFUNC_generic, esp32_gpio_digital_read}
+                             }},
+        JSCFunctionListEntry{"digitalWrite", 0, JS_DEF_CFUNC, 0, {
+                               func : {2, JS_CFUNC_generic, esp32_gpio_digital_write}
+                             }},
+        JSCFunctionListEntry{"registerLoop", 0, JS_DEF_CFUNC, 0, {
+                               func : {1, JS_CFUNC_generic, esp32_register_loop}
+                             }},
+#ifdef ENABLE_HTTP
+        JSCFunctionListEntry{"wifiIsConnected", 0, JS_DEF_CGETSET, 0, {
+                               getset : {wifi_is_connected, nullptr}
+                             }},
+        JSCFunctionListEntry{"fetch", 0, JS_DEF_CFUNC, 0, {
+                               func : {2, JS_CFUNC_generic, http_fetch}
+                             }},
+#endif
+    };
 
-    JS_SetPropertyStr(ctx, global, "registerLoop",
-                      JS_NewCFunction(ctx, register_loop, "registerLoop", 1));
+#ifdef ESP32_MODULE
+    JSModuleDef *m =
+        JS_NewCModule(ctx, "esp32", [](JSContext *ctx, JSModuleDef *m) {
+          return JS_SetModuleExportList(
+              ctx, m, esp32_funcs,
+              sizeof(esp32_funcs) / sizeof(JSCFunctionListEntry));
+        });
+    if (m) {
+      JS_AddModuleExportList(
+          ctx, m, esp32_funcs,
+          sizeof(esp32_funcs) / sizeof(JSCFunctionListEntry));
+    }
+#else
+    // import * as esp32 from "esp32";
+    JSValue esp32 = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, global, "esp32", esp32);
+    JS_SetPropertyFunctionList(
+        ctx, esp32, esp32_funcs,
+        sizeof(esp32_funcs) / sizeof(JSCFunctionListEntry));
+#endif
+  }
 
+  static JSValue console_log(JSContext *ctx, JSValueConst jsThis, int argc,
+                             JSValueConst *argv) {
+    for (int i = 0; i < argc; i++) {
+      const char *str = JS_ToCString(ctx, argv[i]);
+      if (str) {
+        Serial.println(str);
+        JS_FreeCString(ctx, str);
+      }
+    }
+    return JS_UNDEFINED;
   }
 
   static JSValue set_timeout(JSContext *ctx, JSValueConst jsThis, int argc,
@@ -246,7 +396,12 @@ class ESP32QuickJS {
     return JS_NewUint32(ctx, id);
   }
 
-  static JSValue gpio_mode(JSContext *ctx, JSValueConst jsThis, int argc,
+  static JSValue esp32_millis(JSContext *ctx, JSValueConst jsThis, int argc,
+                              JSValueConst *argv) {
+    return JS_NewUint32(ctx, millis());
+  }
+
+  static JSValue esp32_gpio_mode(JSContext *ctx, JSValueConst jsThis, int argc,
                            JSValueConst *argv) {
     uint32_t pin, mode;
     JS_ToUint32(ctx, &pin, argv[0]);
@@ -255,14 +410,14 @@ class ESP32QuickJS {
     return JS_UNDEFINED;
   }
 
-  static JSValue gpio_digital_read(JSContext *ctx, JSValueConst jsThis,
+  static JSValue esp32_gpio_digital_read(JSContext *ctx, JSValueConst jsThis,
                                    int argc, JSValueConst *argv) {
     uint32_t pin;
     JS_ToUint32(ctx, &pin, argv[0]);
     return JS_NewUint32(ctx, digitalRead(pin));
   }
 
-  static JSValue gpio_digital_write(JSContext *ctx, JSValueConst jsThis,
+  static JSValue esp32_gpio_digital_write(JSContext *ctx, JSValueConst jsThis,
                                     int argc, JSValueConst *argv) {
     uint32_t pin, value;
     JS_ToUint32(ctx, &pin, argv[0]);
@@ -271,20 +426,23 @@ class ESP32QuickJS {
     return JS_UNDEFINED;
   }
 
-  static JSValue console_log(JSContext *ctx, JSValueConst jsThis, int argc,
-                             JSValueConst *argv) {
-    const char *str = JS_ToCString(ctx, argv[0]);
-    if (str) {
-      Serial.println(str);
-      JS_FreeCString(ctx, str);
-    }
-    return JS_UNDEFINED;
-  }
-
-  static JSValue register_loop(JSContext *ctx, JSValueConst jsThis, int argc,
+  static JSValue esp32_register_loop(JSContext *ctx, JSValueConst jsThis, int argc,
                                JSValueConst *argv) {
     ESP32QuickJS *qjs = (ESP32QuickJS *)JS_GetContextOpaque(ctx);
     qjs->setLoopFunc(JS_DupValue(ctx, argv[0]));
     return JS_UNDEFINED;
   }
+
+#ifdef ENABLE_HTTP
+  static JSValue wifi_is_connected(JSContext *ctx, JSValueConst jsThis,
+                                   int argc, JSValueConst *argv) {
+    return JS_NewBool(ctx, WiFi.status() == WL_CONNECTED);
+  }
+
+  static JSValue http_fetch(JSContext *ctx, JSValueConst jsThis, int argc,
+                            JSValueConst *argv) {
+    ESP32QuickJS *qjs = (ESP32QuickJS *)JS_GetContextOpaque(ctx);
+    return qjs->httpFetcher.fetch(ctx, argv[0], argv[1]);
+  }
+#endif
 };

@@ -33,3 +33,26 @@ void setup() {
   qjs.exec(jscode);
 }
 ```
+
+# APIs
+
+
+
+- console.log(string)
+- setTimeout(callback, ms)
+- setInterval(callback, ms)
+- esp32.millis
+- esp32.digitalRead(pin)
+- esp32.digitalWrite(pin, value)
+- esp32.pinMode(pin, mode)
+- esp32.registerLoop(func) : func is called every arduino loop().
+
+if WiFi.h is included:
+
+- esp32.wifiIsConnected : bool
+- esp32.fetch(url, {method:string, body:string}): Promise<{body:string, status:int}>
+
+
+# License
+
+MIT License

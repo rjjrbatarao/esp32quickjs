@@ -1,20 +1,22 @@
 #pragma once
-#include <Arduino.h>
 
-#if defined(WiFi_h) || defined(ENABLE_HTTP)
-#include <HTTPClient.h>
-#include <StreamString.h>
-#ifndef ENABLE_HTTP
-#define ENABLE_HTTP
+#if defined(WiFi_h) && !defined(ENABLE_WIFI)
+#define ENABLE_WIFI
 #endif
-#endif
+
+#include <Arduino.h>
 
 #include <algorithm>
 #include <vector>
 
+#ifdef ENABLE_WIFI
+#include <HTTPClient.h>
+#include <StreamString.h>
+#endif
+
 #include "../quickjs.h"
 
-void qjs_dump_exception(JSContext *ctx, JSValue v) {
+static void qjs_dump_exception(JSContext *ctx, JSValue v) {
   if (!JS_IsUndefined(v)) {
     const char *str = JS_ToCString(ctx, v);
     if (str) {
@@ -44,7 +46,7 @@ void qjs_dump_exception(JSContext *ctx, JSValue v) {
   JS_FreeValue(ctx, e);
 }
 
-#ifdef ENABLE_HTTP
+#ifdef ENABLE_WIFI
 class JSHttpFetcher {
   struct Entry {
     HTTPClient *client;
@@ -134,7 +136,7 @@ class JSHttpFetcher {
     }
   }
 };
-#endif  // ENABLE_HTTP
+#endif  // ENABLE_WIFI
 
 class JSTimer {
   // 20 bytes / entry.
@@ -202,7 +204,7 @@ class ESP32QuickJS {
   JSContext *ctx;
   JSTimer timer;
   JSValue loop_func = JS_UNDEFINED;
-#ifdef ENABLE_HTTP
+#ifdef ENABLE_WIFI
   JSHttpFetcher httpFetcher;
 #endif
 
@@ -224,6 +226,11 @@ class ESP32QuickJS {
     JS_FreeValue(ctx, global);
   }
 
+  void end() {
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+  }
+
   void loop(bool callLoopFn = true) {
     // async
     JSContext *c;
@@ -238,7 +245,7 @@ class ESP32QuickJS {
       timer.ConsumeTimer(ctx, now);
     }
 
-#ifdef ENABLE_HTTP
+#ifdef ENABLE_WIFI
     httpFetcher.loop(ctx);
 #endif
 
@@ -270,15 +277,10 @@ class ESP32QuickJS {
     return ret;
   }
 
-  void registerLoopFunc(const char *fname) {
+  void setLoopFunc(const char *fname) {
     JSValue global = JS_GetGlobalObject(ctx);
     setLoopFunc(JS_GetPropertyStr(ctx, global, fname));
     JS_FreeValue(ctx, global);
-  }
-
-  void dispose() {
-    JS_FreeContext(ctx);
-    JS_FreeRuntime(rt);
   }
 
  protected:
@@ -308,24 +310,29 @@ class ESP32QuickJS {
                       JS_NewCFunction(ctx, clear_timeout, "clearInterval", 1));
 
     static const JSCFunctionListEntry esp32_funcs[] = {
-        JSCFunctionListEntry{"millis", 0, JS_DEF_CGETSET, 0, {
-                               getset : {esp32_millis, nullptr}
+        JSCFunctionListEntry{"millis", 0, JS_DEF_CFUNC, 0, {
+                               func : {0, JS_CFUNC_generic, esp32_millis}
                              }},
         JSCFunctionListEntry{"pinMode", 0, JS_DEF_CFUNC, 0, {
                                func : {2, JS_CFUNC_generic, esp32_gpio_mode}
                              }},
-        JSCFunctionListEntry{"digitalRead", 0, JS_DEF_CFUNC, 0, {
-                               func : {1, JS_CFUNC_generic, esp32_gpio_digital_read}
+        JSCFunctionListEntry{
+            "digitalRead", 0, JS_DEF_CFUNC, 0, {
+              func : {1, JS_CFUNC_generic, esp32_gpio_digital_read}
+            }},
+        JSCFunctionListEntry{
+            "digitalWrite", 0, JS_DEF_CFUNC, 0, {
+              func : {2, JS_CFUNC_generic, esp32_gpio_digital_write}
+            }},
+        JSCFunctionListEntry{"deepSleep", 0, JS_DEF_CFUNC, 0, {
+                               func : {1, JS_CFUNC_generic, esp32_deep_sleep}
                              }},
-        JSCFunctionListEntry{"digitalWrite", 0, JS_DEF_CFUNC, 0, {
-                               func : {2, JS_CFUNC_generic, esp32_gpio_digital_write}
+        JSCFunctionListEntry{"setLoop", 0, JS_DEF_CFUNC, 0, {
+                               func : {1, JS_CFUNC_generic, esp32_set_loop}
                              }},
-        JSCFunctionListEntry{"registerLoop", 0, JS_DEF_CFUNC, 0, {
-                               func : {1, JS_CFUNC_generic, esp32_register_loop}
-                             }},
-#ifdef ENABLE_HTTP
-        JSCFunctionListEntry{"wifiIsConnected", 0, JS_DEF_CGETSET, 0, {
-                               getset : {wifi_is_connected, nullptr}
+#ifdef ENABLE_WIFI
+        JSCFunctionListEntry{"isWifiConnected", 0, JS_DEF_CFUNC, 0, {
+                               func : {0, JS_CFUNC_generic, wifi_is_connected}
                              }},
         JSCFunctionListEntry{"fetch", 0, JS_DEF_CFUNC, 0, {
                                func : {2, JS_CFUNC_generic, http_fetch}
@@ -333,7 +340,7 @@ class ESP32QuickJS {
 #endif
     };
 
-#ifdef ESP32_MODULE
+#ifndef GLOBAL_ESP32
     JSModuleDef *m =
         JS_NewCModule(ctx, "esp32", [](JSContext *ctx, JSModuleDef *m) {
           return JS_SetModuleExportList(
@@ -402,7 +409,7 @@ class ESP32QuickJS {
   }
 
   static JSValue esp32_gpio_mode(JSContext *ctx, JSValueConst jsThis, int argc,
-                           JSValueConst *argv) {
+                                 JSValueConst *argv) {
     uint32_t pin, mode;
     JS_ToUint32(ctx, &pin, argv[0]);
     JS_ToUint32(ctx, &mode, argv[1]);
@@ -411,14 +418,14 @@ class ESP32QuickJS {
   }
 
   static JSValue esp32_gpio_digital_read(JSContext *ctx, JSValueConst jsThis,
-                                   int argc, JSValueConst *argv) {
+                                         int argc, JSValueConst *argv) {
     uint32_t pin;
     JS_ToUint32(ctx, &pin, argv[0]);
     return JS_NewUint32(ctx, digitalRead(pin));
   }
 
   static JSValue esp32_gpio_digital_write(JSContext *ctx, JSValueConst jsThis,
-                                    int argc, JSValueConst *argv) {
+                                          int argc, JSValueConst *argv) {
     uint32_t pin, value;
     JS_ToUint32(ctx, &pin, argv[0]);
     JS_ToUint32(ctx, &value, argv[1]);
@@ -426,14 +433,22 @@ class ESP32QuickJS {
     return JS_UNDEFINED;
   }
 
-  static JSValue esp32_register_loop(JSContext *ctx, JSValueConst jsThis, int argc,
-                               JSValueConst *argv) {
+  static JSValue esp32_deep_sleep(JSContext *ctx, JSValueConst jsThis, int argc,
+                                  JSValueConst *argv) {
+    uint32_t t;
+    JS_ToUint32(ctx, &t, argv[0]);
+    ESP.deepSleep(t);  // never return.
+    return JS_UNDEFINED;
+  }
+
+  static JSValue esp32_set_loop(JSContext *ctx, JSValueConst jsThis, int argc,
+                                JSValueConst *argv) {
     ESP32QuickJS *qjs = (ESP32QuickJS *)JS_GetContextOpaque(ctx);
     qjs->setLoopFunc(JS_DupValue(ctx, argv[0]));
     return JS_UNDEFINED;
   }
 
-#ifdef ENABLE_HTTP
+#ifdef ENABLE_WIFI
   static JSValue wifi_is_connected(JSContext *ctx, JSValueConst jsThis,
                                    int argc, JSValueConst *argv) {
     return JS_NewBool(ctx, WiFi.status() == WL_CONNECTED);

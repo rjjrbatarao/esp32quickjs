@@ -42,6 +42,7 @@ void setup() {
 ```
 https://docs.sheetjs.com/docs/demos/engines/quickjs/
 https://www.freelists.org/post/quickjs-devel/Defining-a-New-Class,1
+https://sciter.com/forums/topic/quickjs-std-module/
 ```
 
 # JavaScript API

@@ -44,6 +44,7 @@ https://docs.sheetjs.com/docs/demos/engines/quickjs/
 https://www.freelists.org/post/quickjs-devel/Defining-a-New-Class,1
 https://sciter.com/forums/topic/quickjs-std-module/
 https://gitee.com/openharmony/third_party_quickjs/blob/master/qjsc.c
+https://stackoverflow.com/questions/72665281/quickjs-getting-segfault-when-trying-to-run-script
 ```
 
 # JavaScript API

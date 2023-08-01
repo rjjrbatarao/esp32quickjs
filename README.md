@@ -38,6 +38,11 @@ void setup() {
   qjs.exec(jscode);
 }
 ```
+## quickjs sources
+```
+https://docs.sheetjs.com/docs/demos/engines/quickjs/
+https://www.freelists.org/post/quickjs-devel/Defining-a-New-Class,1
+```
 
 # JavaScript API
 
